@@ -10,3 +10,7 @@
 .idea/opencv.iml
 .idea/.gitignore
 .DS_Store
+.idea/misc.xml
+.gitignore
+.idea/inspectionProfiles/profiles_settings.xml
+.idea/vcs.xml
