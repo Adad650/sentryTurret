@@ -8,8 +8,8 @@ ret, old = cap.read()
 old = cv2.cvtColor(old, cv2.COLOR_BGR2GRAY)
 
 def mapMotion(x, y):
-    mappedX = (-x/1920) * 100
-    mappedY = (-y/1080) * 100
+    mappedX = (x/1920) * 100
+    mappedY = (y/1080) * 100
     print (f"x = {round(mappedX)}%")
     print (f"y = {round(mappedY)}%\n")
     sleep(0.01)
