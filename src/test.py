@@ -1,261 +1,216 @@
-# motion_servo_track.py - Raspberry Pi 3 Version
+# motionServoTrackOneServo_GPIO.py
+# Raspberry Pi + MG90 (pan-only left/right) motion tracking using RPi.GPIO + OpenCV.
+# Naming style: likeThis (camelCase). No pigpio/daemon required.
+
 import cv2
 import time
-import RPi.GPIO as GPIO
-from collections import deque
 import sys
 import os
+import RPi.GPIO as GPIO
 
-def cleanup_and_exit(cap=None, pwm_pan=None, pwm_tilt=None):
-    """Clean up resources and exit gracefully"""
-    if pwm_pan:
-        pwm_pan.stop()
-    if pwm_tilt:
-        pwm_tilt.stop()
-    GPIO.cleanup()
-    if cap:
-        cap.release()
-    cv2.destroyAllWindows()
-    sys.exit(0)
+# ==================== Config ====================
+panGpio = 21                    # BCM pin for pan servo signal (GPIO21 / pin 40 on 40-pin header)
+frameW, frameH = 640, 480
+fps = 60
 
-def test_camera_access():
-    """Test different camera indices and settings for Pi"""
-    print("Testing camera access on Raspberry Pi...")
-    
-    # Check for video devices
+# Motion detection thresholds (tuned for Pi)
+minContourArea = 2000
+motionThreshold = 25
+deadbandPx = 40                 # ignore near-center jitter
+
+# Pan dynamics and limits
+panSpeedDeg = 1.5               # degrees per update
+panMinDeg = 20.0                # keep off hard end-stops
+panMaxDeg = 160.0
+panHomeDeg = 90.0
+invertPan = False               # set True if motion direction feels reversed
+
+# MG90 calibration (typical) for 50 Hz PWM duty cycle
+# 1ms..2ms pulse → 5%..10% duty at 50 Hz (period = 20ms)
+servoMinDuty = 5.0              # ≈ 0°
+servoMaxDuty = 10.0             # ≈ 180°
+servoHomeDuty = 7.5             # ≈ 90°
+pwmHz = 50
+
+# Smoothing for error → smoother motion (0..1)
+smoothing = 0.4
+
+# Camera backends to try on Pi
+cameraBackends = [cv2.CAP_V4L2, 0]
+# =================================================
+
+def angleToDuty(deg: float) -> float:
+    """Map angle [0..180] to duty cycle [%] for 50 Hz PWM."""
+    d = max(0.0, min(180.0, float(deg)))
+    print(servoMinDuty + (servoMaxDuty - servoMinDuty) * (d / 180.0))
+    return servoMinDuty + (servoMaxDuty - servoMinDuty) * (d / 180.0)
+
+def safeSetAngle(pwm, deg: float) -> float:
+    """Clamp angle to safe limits and set duty on the PWM channel."""
+    d = max(panMinDeg, min(panMaxDeg, float(deg)))
+    pwm.ChangeDutyCycle(angleToDuty(d))
+    return d
+
+def testCameraIndex():
+    """Try /dev/video* indices and return a working index or None."""
     if os.path.exists("/dev/video0"):
-        print("✓ /dev/video0 found")
+        print("✓ /dev/video0 present")
     else:
         print("✗ /dev/video0 not found")
-    
-    # Test different camera indices
-    for camera_index in [0, 1]:
-        print(f"Trying camera index {camera_index}...")
-        cap = cv2.VideoCapture(camera_index)
-        
-        if cap.isOpened():
-            ret, frame = cap.read()
-            if ret:
-                height, width = frame.shape[:2]
-                print(f"✓ Camera {camera_index} found: {width}x{height}")
+    for idx in (0, 1):
+        for backend in cameraBackends:
+            cap = cv2.VideoCapture(idx, backend) if backend else cv2.VideoCapture(idx)
+            if not cap.isOpened():
                 cap.release()
-                return camera_index
-            else:
-                print(f"✗ Camera {camera_index} opened but can't read frames")
-                cap.release()
-        else:
-            print(f"✗ Camera {camera_index} not accessible")
-    
-    # Try with V4L2 backend specifically for Pi
-    print("Trying V4L2 backend...")
-    cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
-    if cap.isOpened():
-        ret, frame = cap.read()
-        if ret:
-            height, width = frame.shape[:2]
-            print(f"✓ Camera found with V4L2: {width}x{height}")
+                continue
+            ok, frame = cap.read()
             cap.release()
-            return 0
-        cap.release()
-    
+            if ok:
+                return idx
     return None
 
-# ========= Servo setup (BCM pins) =========
-try:
-    GPIO.setmode(GPIO.BCM)  # Using BCM numbering
-    PAN_PIN  = 21   # left/right  servo (GPIO21)
-    TILT_PIN = 22   # up/down     servo (GPIO22)
+def doCleanup(cap, pwm):
+    try:
+        if cap:
+            cap.release()
+    except Exception:
+        pass
+    try:
+        if pwm:
+            pwm.ChangeDutyCycle(0)
+            pwm.stop()
+    except Exception:
+        pass
+    try:
+        GPIO.cleanup()
+    except Exception:
+        pass
+    try:
+        cv2.destroyAllWindows()
+    except Exception:
+        pass
 
-    GPIO.setup(PAN_PIN,  GPIO.OUT)
-    GPIO.setup(TILT_PIN, GPIO.OUT)
+def main():
+    print("=== Raspberry Pi MG90 Pan Tracker (one servo) — RPi.GPIO ===")
 
-    pwm_pan  = GPIO.PWM(PAN_PIN,  50)   # 50 Hz
-    pwm_tilt = GPIO.PWM(TILT_PIN, 50)
-
-    def set_angle(pwm, deg):
-        deg = max(0.0, min(180.0, float(deg)))
-        duty_cycle = (deg / 18.0) + 2.0
-        pwm.ChangeDutyCycle(duty_cycle)
-
-    # start centered
-    pwm_pan.start(0)
-    pwm_tilt.start(0)
+    # --- GPIO init ---
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setwarnings(False)
+    GPIO.setup(panGpio, GPIO.OUT)
+    pwm = GPIO.PWM(panGpio, pwmHz)
+    pwm.start(0)
     time.sleep(0.1)
-    pan_deg  = 90.0
-    tilt_deg = 90.0
-    set_angle(pwm_pan,  pan_deg)
-    set_angle(pwm_tilt, tilt_deg)
-    print("Servos initialized and centered")
 
-except Exception as e:
-    print(f"GPIO setup failed: {e}")
-    print("Make sure you're running with sudo: sudo python src/test.py")
-    cleanup_and_exit()
+    currentPanDeg = panHomeDeg
+    currentPanDeg = safeSetAngle(pwm, currentPanDeg)
+    time.sleep(0.2)
 
-# ========= Camera setup for Pi =========
-print("Initializing camera on Raspberry Pi...")
+    # --- Camera init ---
+    camIndex = testCameraIndex()
+    if camIndex is None:
+        print("No camera found.\nCheck: ls /dev/video*, cabling, permissions (add user to 'video'), raspi-config.")
+        doCleanup(None, pwm)
+        sys.exit(1)
 
-# Test camera access first
-camera_index = test_camera_access()
-if camera_index is None:
-    print("\n❌ No camera detected on Raspberry Pi!")
-    print("\nTroubleshooting steps for Pi:")
-    print("1. Check camera connection (USB or Pi Camera)")
-    print("2. Run: ls /dev/video*")
-    print("3. For Pi Camera: sudo raspi-config -> Interface Options -> Camera")
-    print("4. For USB camera: lsusb")
-    print("5. Check permissions: sudo usermod -a -G video $USER")
-    print("6. Reboot: sudo reboot")
-    print("7. Try running with sudo: sudo python src/test.py")
-    cleanup_and_exit(cap=None, pwm_pan=pwm_pan, pwm_tilt=pwm_tilt)
+    print(f"Opening camera index {camIndex} …")
+    cap = None
+    for backend in cameraBackends:
+        cap = cv2.VideoCapture(camIndex, backend) if backend else cv2.VideoCapture(camIndex)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, frameW)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, frameH)
+        cap.set(cv2.CAP_PROP_FPS, fps)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        ok, testFrame = cap.read()
+        if ok:
+            break
+        cap.release()
+        cap = None
 
-try:
-    print(f"Opening camera {camera_index} on Pi...")
-    
-    # Try V4L2 backend first (better for Pi)
-    cap = cv2.VideoCapture(camera_index, cv2.CAP_V4L2)
-    if not cap.isOpened():
-        # Fallback to default backend
-        cap = cv2.VideoCapture(camera_index)
-    
-    # Set Pi-optimized camera settings
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    cap.set(cv2.CAP_PROP_FPS, 30)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    
-    # Try to read a test frame
+    if cap is None:
+        print("❌ Camera could not be opened with any backend.")
+        doCleanup(None, pwm)
+        sys.exit(1)
+
     ok, frame = cap.read()
     if not ok:
-        print("❌ Camera opened but can't read frames")
-        print("Trying alternative settings...")
-        
-        # Try different resolutions for Pi
-        resolutions = [(320, 240), (640, 480), (1280, 720)]
-        for width, height in resolutions:
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-            ok, frame = cap.read()
-            if ok:
-                print(f"✓ Camera working at {width}x{height}")
-                break
-        
-        if not ok:
-            print("❌ Camera still not working with any resolution")
-            cleanup_and_exit(cap, pwm_pan, pwm_tilt)
-    
+        print("❌ Camera opened but cannot read frames.")
+        doCleanup(cap, pwm)
+        sys.exit(1)
+
     H, W = frame.shape[:2]
-    print(f"✓ Camera initialized on Pi: {W}x{H}")
+    print(f"✓ Camera up: {W}x{H} @ ~{fps} FPS")
 
-except Exception as e:
-    print(f"❌ Camera setup failed: {e}")
-    cleanup_and_exit(cap=None, pwm_pan=pwm_pan, pwm_tilt=pwm_tilt)
+    previousGray = None
+    filteredErrX = 0.0
 
-# ========= Motion detection setup =========
-# Simple frame differencing for motion detection
-previous_gray = None
-MIN_CONTOUR_AREA = 2000  # Lower threshold for Pi
-MOTION_THRESHOLD = 25    # Threshold for motion detection
+    print("Motion tracking: 'q' quit, 'c' center pan.")
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                print("Frame read failed")
+                break
 
-# ========= Servo control parameters =========
-PAN_SPEED = 1.5    # Degrees per frame (slower for Pi)
-TILT_SPEED = 1.5   # Degrees per frame
-DEADBAND = 40      # Pixels from center to ignore (larger for Pi)
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            gray = cv2.GaussianBlur(gray, (21, 21), 0)
 
-print("Motion tracking started on Raspberry Pi. Press 'q' to quit, 'c' to center servos.")
+            if previousGray is not None:
+                delta = cv2.absdiff(previousGray, gray)
+                _, thresh = cv2.threshold(delta, motionThreshold, 255, cv2.THRESH_BINARY)
+                thresh = cv2.dilate(thresh, None, iterations=2)
 
-try:
-    while True:
-        ok, frame = cap.read()
-        if not ok: 
-            print("Failed to read frame")
-            break
+                contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        # Convert to grayscale and blur
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (21, 21), 0)
+                if contours:
+                    c = max(contours, key=cv2.contourArea)
+                    if cv2.contourArea(c) > minContourArea:
+                        x, y, w, h = cv2.boundingRect(c)
+                        cx = x + w // 2
+                        cy = y + h // 2
 
-        # Motion detection using frame differencing
-        if previous_gray is not None:
-            # Calculate frame difference
-            frame_delta = cv2.absdiff(previous_gray, gray)
-            _, thresh = cv2.threshold(frame_delta, MOTION_THRESHOLD, 255, cv2.THRESH_BINARY)
-            thresh = cv2.dilate(thresh, None, iterations=2)
-            
-            # Find contours
-            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                        cv2.circle(frame, (cx, cy), 5, (0, 255, 255), -1)
 
-            motion_detected = False
-            if contours:
-                # Find largest contour
-                largest_contour = max(contours, key=cv2.contourArea)
-                if cv2.contourArea(largest_contour) > MIN_CONTOUR_AREA:
-                    motion_detected = True
-                    
-                    # Get bounding rectangle
-                    x, y, w, h = cv2.boundingRect(largest_contour)
-                    center_x = x + w // 2
-                    center_y = y + h // 2
-                    
-                    # Draw rectangle around motion
-                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                    cv2.circle(frame, (center_x, center_y), 5, (0, 255, 255), -1)
-                    
-                    # Calculate distance from center
-                    center_error_x = center_x - (W // 2)
-                    center_error_y = center_y - (H // 2)
-                    
-                    # Move servos based on motion position
-                    if abs(center_error_x) > DEADBAND:
-                        if center_error_x > 0:  # Motion is right of center
-                            pan_deg -= PAN_SPEED
-                        else:  # Motion is left of center
-                            pan_deg += PAN_SPEED
-                        
-                        # Clamp pan angle
-                        pan_deg = max(0.0, min(180.0, pan_deg))
-                        set_angle(pwm_pan, pan_deg)
-                        print(f"Pan servo moved to {pan_deg:.1f}°")
-                    
-                    if abs(center_error_y) > DEADBAND:
-                        if center_error_y > 0:  # Motion is below center
-                            tilt_deg += TILT_SPEED
-                        else:  # Motion is above center
-                            tilt_deg -= TILT_SPEED
-                        
-                        # Clamp tilt angle
-                        tilt_deg = max(45.0, min(135.0, tilt_deg))
-                        set_angle(pwm_tilt, tilt_deg)
-                        print(f"Tilt servo moved to {tilt_deg:.1f}°")
+                        errX = cx - (W // 2)
 
-        # Update previous frame
-        previous_gray = gray
+                        # Deadband to avoid jitter
+                        if abs(errX) > deadbandPx:
+                            # Low-pass filter
+                            filteredErrX = (smoothing * filteredErrX) + ((1.0 - smoothing) * errX)
 
-        # Draw center crosshair
-        cv2.line(frame, (W//2, 0), (W//2, H), (255, 0, 0), 1)
-        cv2.line(frame, (0, H//2), (W, H//2), (255, 0, 0), 1)
-        cv2.circle(frame, (W//2, H//2), 10, (255, 0, 0), 2)
+                            # Direction (invert if needed)
+                            if (filteredErrX > 0) ^ invertPan:
+                                currentPanDeg -= panSpeedDeg
+                            else:
+                                currentPanDeg += panSpeedDeg
 
-        # Display frame (smaller for Pi performance)
-        display_frame = cv2.resize(frame, (640, 480))
-        mirrored_frame = cv2.flip(display_frame, 1)
-        cv2.imshow("Motion Tracking (q=quit, c=center)", mirrored_frame)
-        
-        # Handle key presses
-        k = cv2.waitKey(1) & 0xFF
-        if k == ord('q'): 
-            break
-        if k == ord('c'):
-            pan_deg, tilt_deg = 90.0, 90.0
-            set_angle(pwm_pan, pan_deg)
-            set_angle(pwm_tilt, tilt_deg)
-            print("Servos centered")
+                            currentPanDeg = safeSetAngle(pwm, currentPanDeg)
+                            # print(f"Pan: {currentPanDeg:.1f}°")
 
-except KeyboardInterrupt:
-    print("\nInterrupted by user")
-except Exception as e:
-    print(f"Error during execution: {e}")
-finally:
-    # cleanup
-    cleanup_and_exit(cap, pwm_pan, pwm_tilt)
+            previousGray = gray
 
+            # Crosshair
+            cv2.line(frame, (W // 2, 0), (W // 2, H), (255, 0, 0), 1)
+            cv2.line(frame, (0, H // 2), (W, H // 2), (255, 0, 0), 1)
+            cv2.circle(frame, (W // 2, H // 2), 10, (255, 0, 0), 2)
+
+            display = cv2.resize(frame, (640, 480))
+            display = cv2.flip(display, 1)
+            cv2.imshow("Pan Motion Tracking (q=quit, c=center)", display)
+
+            k = cv2.waitKey(1) & 0xFF
+            if k == ord('q'):
+                break
+            if k == ord('c'):
+                currentPanDeg = safeSetAngle(pwm, panHomeDeg)
+                print("Centered pan")
+
+    except KeyboardInterrupt:
+        print("\nInterrupted.")
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        doCleanup(cap, pwm)
+
+if __name__ == "__main__":
+    main()
