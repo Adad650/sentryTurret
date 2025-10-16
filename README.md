@@ -2,6 +2,10 @@
 
 This project implements advanced motion detection and servo tracking systems using OpenCV. It includes both a standalone motion detector and a servo-controlled tracking system for Raspberry Pi.
 
+Immediate Todo:
+* Bring this to one system. Enable moving servo motors with a Raspberry Pi so that the camera compute and the motor compute can both run on the same machine.
+* This avoids the un-neccessary R-pi <> esp32 complication.
+
 ## Features
 
 ### Motion Detection (`motion.py`)
