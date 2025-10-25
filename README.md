@@ -1,58 +1,63 @@
-# OpenCV Motion Detection & Servo Tracking
+# Sentry Turret - Motion Detection & Servo Tracking
 
-This project implements advanced motion detection and servo tracking systems using OpenCV. It includes both a standalone motion detector and a servo-controlled tracking system for Raspberry Pi.
+This project implements advanced motion detection and servo tracking systems using OpenCV and Raspberry Pi. It includes multiple implementations with different features and control methods.
 
 ## Features
 
-### Motion Detection (`motion.py`)
+### Motion Detection & Single Servo Control (`motion.py`)
 - **Real-time motion detection** using frame differencing
-- **Object tracking** with bounding box visualization
-- **Percentage mapping** of motion coordinates
-- **Dynamic resolution detection** - adapts to any camera
-- **Robust error handling** and graceful cleanup
-- **Configurable parameters** for sensitivity and detection area
-- **Mirrored display** for intuitive viewing
+- **Single-axis servo control** (pan only) with RPi.GPIO
+- **Web API** for remote monitoring and control
+- **MJPEG streaming** of the camera feed
+- **RESTful endpoints** for angle data and snapshots
+- **Thread-safe** design for concurrent operation
+- **Configurable** motion detection and servo parameters
 
-### Servo Tracking (`test.py`)
-- **Dual-axis servo control** (pan/tilt) for motion tracking
-- **PD control system** for smooth servo movement
-- **Background subtraction** for improved motion detection
-- **Stable motion filtering** to reduce jitter
-- **Field of view calibration** for accurate tracking
-- **Rate limiting** to prevent servo damage
-- **Emergency stop** and centering controls
+### Pan-Only Servo Tracking (`test.py`)
+- **Single-axis servo control** (pan) with RPi.GPIO
+- **Motion detection** with configurable thresholds
+- **Smooth motion** with adjustable speed and deadband
+- **Camera configuration** for optimal performance
+- **Keyboard controls** for manual operation
+
+### Vision Server with Flask API (`otherTest.py`)
+- **Web-based API** for motion detection and angle calculation
+- **MJPEG streaming** endpoint
+- **RESTful endpoints** for angle data and snapshots
+- **Configurable** field of view and motion parameters
+- **Cross-platform** operation (not limited to Raspberry Pi)
 
 ## Requirements
 
-### Hardware (for servo tracking)
-- Raspberry Pi (any model)
-- 2x SG90 or similar servo motors
-- Camera module or USB webcam
-- Breadboard and jumper wires
+### Hardware
+- **For servo control (motion.py, test.py):**
+  - Raspberry Pi (any model)
+  - SG90 or similar servo motor(s)
+  - Camera module or USB webcam
+  - Breadboard and jumper wires
+  - 5V power supply for servos
 
 ### Software
 - Python 3.7+
 - OpenCV 4.8+
 - RPi.GPIO (for servo control)
+- Flask (for web interfaces)
 
-## Installation
+## License
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/Adad650/openCV.git
-   cd openCV
-   ```
+## Contributing
+Contributions are welcome! Please follow these steps:
+1. Fork the repository
+2. Create a feature branch
+3. Commit your changes
+4. Push to the branch
+5. Create a new Pull Request
 
-2. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. **Hardware setup (for servo tracking):**
-   - Connect pan servo to GPIO pin 11 (BOARD numbering)
-   - Connect tilt servo to GPIO pin 13 (BOARD numbering)
-   - Power servos with 5V supply
-   - Connect camera to USB or CSI port
+## Acknowledgments
+- OpenCV for computer vision capabilities
+- Flask for web interface
+- Raspberry Pi community for hardware support
 
 ## Usage
 
